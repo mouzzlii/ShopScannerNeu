@@ -58,8 +58,8 @@ jobs:
               applicationId = "com.shopscanner.neu"
               minSdk = 24
               targetSdk = 34
-              versionCode = 14
-              versionName = "1.4"
+              versionCode = 15
+              versionName = "1.5"
             }
             compileOptions {
               sourceCompatibility = JavaVersion.VERSION_17
@@ -146,23 +146,24 @@ jobs:
 
           fun analyzeCode(raw: String): ScanAnalysis {
               val c = cleanCode(raw)
-              if (c.isEmpty()) return ScanAnalysis("", null, false, "Bereit (v1.4)")
+              if (c.isEmpty()) return ScanAnalysis("", null, false, "Bereit (v1.5)")
+
+              val isDigits = c.all { it.isDigit() }
+              val dpdPrefixes = listOf("0034", "01", "05", "06", "07", "09")
 
               return when {
                   c.startsWith("1Z") && c.length >= 10 ->
                       ScanAnalysis(c, Carrier.UPS, false, "UPS (1Z) erkannt")
-                  c.startsWith("0034") && c.length >= 14 ->
-                      ScanAnalysis(c, Carrier.DPD, false, "DPD (0034) erkannt")
                   c.startsWith("H") && c.length >= 10 ->
                       ScanAnalysis(c, Carrier.HERMES, false, "Hermes (H) erkannt")
-                  c.length == 12 && c.all { it.isDigit() } ->
-                      ScanAnalysis(c, null, true, "12 Ziffern: GLS oder DPD wählen")
-                  (c.startsWith("01") || c.startsWith("05")) && c.length in 10..20 && c.all { it.isDigit() } ->
+                  isDigits && dpdPrefixes.any { c.startsWith(it) } && c.length >= 10 ->
                       ScanAnalysis(c, Carrier.DPD, false, "DPD erkannt")
-                  c.length in 14..22 && c.all { it.isDigit() } ->
-                      ScanAnalysis(c, Carrier.HERMES, false, "Hermes erkannt")
-                  c.length in 11..13 && c.all { it.isDigit() } ->
+                  isDigits && c.length == 12 ->
+                      ScanAnalysis(c, null, true, "12 Ziffern: GLS oder DPD wählen")
+                  isDigits && c.length in 11..13 ->
                       ScanAnalysis(c, Carrier.GLS, false, "GLS erkannt")
+                  isDigits && c.length in 14..22 ->
+                      ScanAnalysis(c, Carrier.HERMES, false, "Hermes erkannt")
                   else ->
                       ScanAnalysis(c, null, false, "Anbieter wählen")
               }
@@ -179,7 +180,7 @@ jobs:
           @Composable
           fun NeuApp() {
               val ctx = LocalContext.current
-              val prefs = remember { ctx.getSharedPreferences("shopscanner_v14", Context.MODE_PRIVATE) }
+              val prefs = remember { ctx.getSharedPreferences("shopscanner_v15", Context.MODE_PRIVATE) }
 
               var autoOpen by remember { mutableStateOf(prefs.getBoolean("auto", false)) }
               var carrier by remember {
@@ -194,7 +195,7 @@ jobs:
 
               var code by remember { mutableStateOf("") }
               var showUrlDialog by remember { mutableStateOf(false) }
-              var status by remember { mutableStateOf("Bereit (v1.4)") }
+              var status by remember { mutableStateOf("Bereit (v1.5)") }
 
               val analysis = remember(code) { analyzeCode(code) }
 
@@ -302,7 +303,7 @@ jobs:
                       .padding(20.dp),
                   verticalArrangement = Arrangement.spacedBy(12.dp)
               ) {
-                  Text("ShopScannerNeu v1.4", style = MaterialTheme.typography.headlineSmall)
+                  Text("ShopScannerNeu v1.5", style = MaterialTheme.typography.headlineSmall)
 
                   Button(
                       onClick = {
@@ -387,7 +388,7 @@ jobs:
                           onClick = { openTracking(carrier, code) },
                           modifier = Modifier.weight(1f)
                       ) { Text("Zu ${carrier.label}") }
-                      OutlinedButton(onClick = { code = ""; status = "Bereit (v1.4)" }) { Text("Leeren") }
+                      OutlinedButton(onClick = { code = ""; status = "Bereit (v1.5)" }) { Text("Leeren") }
                   }
 
                   OutlinedButton(
