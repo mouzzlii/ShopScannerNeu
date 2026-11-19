@@ -58,8 +58,8 @@ jobs:
               applicationId = "com.shopscanner.neu"
               minSdk = 24
               targetSdk = 34
-              versionCode = 15
-              versionName = "1.5"
+              versionCode = 17
+              versionName = "1.7"
             }
             compileOptions {
               sourceCompatibility = JavaVersion.VERSION_17
@@ -111,12 +111,16 @@ jobs:
           import androidx.activity.compose.setContent
           import androidx.compose.foundation.layout.*
           import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.text.KeyboardActions
+          import androidx.compose.foundation.text.KeyboardOptions
           import androidx.compose.foundation.verticalScroll
           import androidx.compose.material3.*
           import androidx.compose.runtime.*
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
           import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.platform.LocalFocusManager
+          import androidx.compose.ui.text.input.ImeAction
           import androidx.compose.ui.unit.dp
           import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
           import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
@@ -128,11 +132,11 @@ jobs:
               UPS("UPS", "https://www.ups.com/track?loc=de_AT&tracknum=")
           }
 
-          data class ScanAnalysis(
+          data class ParseResult(
               val cleanCode: String,
-              val suggestedCarrier: Carrier?,
-              val ambiguous12: Boolean,
-              val note: String
+              val unambiguousCarrier: Carrier?,
+              val conflict: Boolean,
+              val message: String
           )
 
           fun cleanCode(raw: String): String {
@@ -144,28 +148,19 @@ jobs:
               return upper.replace(" ", "").replace("-", "")
           }
 
-          fun analyzeCode(raw: String): ScanAnalysis {
+          fun parseCode(raw: String): ParseResult {
               val c = cleanCode(raw)
-              if (c.isEmpty()) return ScanAnalysis("", null, false, "Bereit (v1.5)")
-
-              val isDigits = c.all { it.isDigit() }
-              val dpdPrefixes = listOf("0034", "01", "05", "06", "07", "09")
+              if (c.isEmpty()) return ParseResult("", null, false, "Bereit (v1.7)")
 
               return when {
                   c.startsWith("1Z") && c.length >= 10 ->
-                      ScanAnalysis(c, Carrier.UPS, false, "UPS (1Z) erkannt")
+                      ParseResult(c, Carrier.UPS, false, "Eindeutig: UPS")
+                  c.startsWith("0034") && c.length >= 12 ->
+                      ParseResult(c, Carrier.DPD, false, "Eindeutig: DPD")
                   c.startsWith("H") && c.length >= 10 ->
-                      ScanAnalysis(c, Carrier.HERMES, false, "Hermes (H) erkannt")
-                  isDigits && dpdPrefixes.any { c.startsWith(it) } && c.length >= 10 ->
-                      ScanAnalysis(c, Carrier.DPD, false, "DPD erkannt")
-                  isDigits && c.length == 12 ->
-                      ScanAnalysis(c, null, true, "12 Ziffern: GLS oder DPD wählen")
-                  isDigits && c.length in 11..13 ->
-                      ScanAnalysis(c, Carrier.GLS, false, "GLS erkannt")
-                  isDigits && c.length in 14..22 ->
-                      ScanAnalysis(c, Carrier.HERMES, false, "Hermes erkannt")
+                      ParseResult(c, Carrier.HERMES, false, "Eindeutig: Hermes")
                   else ->
-                      ScanAnalysis(c, null, false, "Anbieter wählen")
+                      ParseResult(c, null, true, "Konflikt/Unklar: Bitte Dienstleister wählen")
               }
           }
 
@@ -180,7 +175,8 @@ jobs:
           @Composable
           fun NeuApp() {
               val ctx = LocalContext.current
-              val prefs = remember { ctx.getSharedPreferences("shopscanner_v15", Context.MODE_PRIVATE) }
+              val focusManager = LocalFocusManager.current
+              val prefs = remember { ctx.getSharedPreferences("shopscanner_v17", Context.MODE_PRIVATE) }
 
               var autoOpen by remember { mutableStateOf(prefs.getBoolean("auto", false)) }
               var carrier by remember {
@@ -193,11 +189,11 @@ jobs:
               var hermesUrl by remember { mutableStateOf(prefs.getString("url_HERMES", Carrier.HERMES.url) ?: Carrier.HERMES.url) }
               var upsUrl by remember { mutableStateOf(prefs.getString("url_UPS", Carrier.UPS.url) ?: Carrier.UPS.url) }
 
-              var code by remember { mutableStateOf("") }
+              var draftCode by remember { mutableStateOf("") }
+              var activeCode by remember { mutableStateOf("") }
+              var conflictActive by remember { mutableStateOf(false) }
               var showUrlDialog by remember { mutableStateOf(false) }
-              var status by remember { mutableStateOf("Bereit (v1.5)") }
-
-              val analysis = remember(code) { analyzeCode(code) }
+              var status by remember { mutableStateOf("Bereit (v1.7) – Nummer eingeben & Enter drücken") }
 
               fun urlFor(c: Carrier): String = when (c) {
                   Carrier.GLS -> glsUrl
@@ -217,47 +213,55 @@ jobs:
                       .commit()
               }
 
-              fun copyClean(rawCode: String): String {
-                  val clean = cleanCode(rawCode)
+              fun copyToClipboard(clean: String) {
                   if (clean.isNotEmpty()) {
                       val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                       cm.setPrimaryClip(ClipData.newPlainText("Tracking", clean))
                   }
-                  return clean
               }
 
-              fun openTracking(target: Carrier, rawCode: String) {
-                  val clean = copyClean(rawCode)
+              fun openTracking(target: Carrier, rawSource: String) {
+                  val clean = cleanCode(rawSource)
                   if (clean.isEmpty()) {
-                      status = "Bitte Nummer eingeben oder scannen"
+                      status = "Bitte zuerst Sendungsnummer eingeben und Enter drücken"
                       return
                   }
+                  activeCode = clean
+                  draftCode = clean
                   carrier = target
+                  conflictActive = false
                   saveAll()
+                  copyToClipboard(clean)
                   val base = urlFor(target).trim().ifBlank { target.url }
                   val full = if (base.endsWith("=") || base.endsWith("/")) base + Uri.encode(clean) else base
                   ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(full)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                   status = "${target.label}: $clean geöffnet"
               }
 
-              fun onCode(input: String) {
-                  code = input
-                  val res = analyzeCode(input)
-                  if (res.cleanCode.isNotEmpty()) copyClean(res.cleanCode)
-
-                  if (res.ambiguous12) {
-                      status = "${res.cleanCode} – 12 Ziffern: GLS oder DPD antippen"
+              fun confirmCode(rawInput: String, fromScanner: Boolean) {
+                  val res = parseCode(rawInput)
+                  if (res.cleanCode.isEmpty()) {
+                      activeCode = ""
+                      conflictActive = false
+                      status = "Keine gültige Nummer übernommen"
                       return
                   }
-                  if (res.suggestedCarrier != null) {
-                      carrier = res.suggestedCarrier
+                  draftCode = res.cleanCode
+                  activeCode = res.cleanCode
+                  copyToClipboard(res.cleanCode)
+                  focusManager.clearFocus()
+
+                  if (res.unambiguousCarrier != null && !res.conflict) {
+                      carrier = res.unambiguousCarrier
+                      conflictActive = false
                       saveAll()
-                      status = "${res.note}: ${res.cleanCode}"
-                      if (autoOpen) {
-                          openTracking(res.suggestedCarrier, res.cleanCode)
+                      status = "${res.message}: ${res.cleanCode}"
+                      if (autoOpen || fromScanner) {
+                          openTracking(res.unambiguousCarrier, res.cleanCode)
                       }
                   } else {
-                      status = res.note
+                      conflictActive = true
+                      status = "${res.cleanCode} – Konflikt: Bitte Dienstleister wählen"
                   }
               }
 
@@ -303,12 +307,12 @@ jobs:
                       .padding(20.dp),
                   verticalArrangement = Arrangement.spacedBy(12.dp)
               ) {
-                  Text("ShopScannerNeu v1.5", style = MaterialTheme.typography.headlineSmall)
+                  Text("ShopScannerNeu v1.7", style = MaterialTheme.typography.headlineSmall)
 
                   Button(
                       onClick = {
                           scanner.startScan()
-                              .addOnSuccessListener { bc -> bc.rawValue?.let { onCode(it) } }
+                              .addOnSuccessListener { bc -> bc.rawValue?.let { confirmCode(it, fromScanner = true) } }
                               .addOnFailureListener { e -> status = "Scan: ${e.localizedMessage ?: "abgebrochen"}" }
                       },
                       modifier = Modifier.fillMaxWidth()
@@ -316,37 +320,58 @@ jobs:
                       Text("Barcode scannen")
                   }
 
-                  OutlinedTextField(
-                      value = code,
-                      onValueChange = { onCode(it) },
-                      label = { Text("Sendungsnummer") },
-                      singleLine = true,
-                      modifier = Modifier.fillMaxWidth()
-                  )
+                  Row(
+                      modifier = Modifier.fillMaxWidth(),
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.spacedBy(8.dp)
+                  ) {
+                      OutlinedTextField(
+                          value = draftCode,
+                          onValueChange = { draftCode = it },
+                          label = { Text("Sendungsnummer") },
+                          singleLine = true,
+                          keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                          keyboardActions = KeyboardActions(onDone = { confirmCode(draftCode, fromScanner = false) }),
+                          modifier = Modifier.weight(1f)
+                      )
+                      Button(
+                          onClick = { confirmCode(draftCode, fromScanner = false) },
+                          modifier = Modifier.height(56.dp)
+                      ) {
+                          Text("Enter")
+                      }
+                  }
 
-                  if (analysis.ambiguous12) {
+                  if (conflictActive) {
+                      Text(
+                          "Konflikt – Dienstleister manuell wählen:",
+                          style = MaterialTheme.typography.titleSmall
+                      )
                       Row(
                           modifier = Modifier.fillMaxWidth(),
-                          horizontalArrangement = Arrangement.spacedBy(12.dp)
+                          horizontalArrangement = Arrangement.spacedBy(10.dp)
                       ) {
                           Button(
-                              onClick = { openTracking(Carrier.GLS, code) },
-                              modifier = Modifier
-                                  .weight(1f)
-                                  .height(64.dp),
-                              colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                          ) {
-                              Text("GLS", style = MaterialTheme.typography.titleMedium)
-                          }
+                              onClick = { openTracking(Carrier.GLS, activeCode.ifBlank { draftCode }) },
+                              modifier = Modifier.weight(1f).height(58.dp)
+                          ) { Text("GLS") }
                           Button(
-                              onClick = { openTracking(Carrier.DPD, code) },
-                              modifier = Modifier
-                                  .weight(1f)
-                                  .height(64.dp),
-                              colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-                          ) {
-                              Text("DPD", style = MaterialTheme.typography.titleMedium)
-                          }
+                              onClick = { openTracking(Carrier.DPD, activeCode.ifBlank { draftCode }) },
+                              modifier = Modifier.weight(1f).height(58.dp)
+                          ) { Text("DPD") }
+                      }
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(10.dp)
+                      ) {
+                          OutlinedButton(
+                              onClick = { openTracking(Carrier.HERMES, activeCode.ifBlank { draftCode }) },
+                              modifier = Modifier.weight(1f).height(54.dp)
+                          ) { Text("Hermes") }
+                          OutlinedButton(
+                              onClick = { openTracking(Carrier.UPS, activeCode.ifBlank { draftCode }) },
+                              modifier = Modifier.weight(1f).height(54.dp)
+                          ) { Text("UPS") }
                       }
                   }
 
@@ -360,7 +385,7 @@ jobs:
                               onClick = {
                                   carrier = item
                                   saveAll()
-                                  status = "Anbieter: ${item.label}"
+                                  status = "Dienstleister: ${item.label}"
                               },
                               label = { Text(item.label) }
                           )
@@ -372,7 +397,7 @@ jobs:
                       verticalAlignment = Alignment.CenterVertically,
                       horizontalArrangement = Arrangement.spacedBy(12.dp)
                   ) {
-                      Text("Automatisch öffnen", modifier = Modifier.weight(1f))
+                      Text("Automatisch öffnen (bei Eindeutigkeit)", modifier = Modifier.weight(1f))
                       Switch(
                           checked = autoOpen,
                           onCheckedChange = {
@@ -385,10 +410,17 @@ jobs:
 
                   Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                       Button(
-                          onClick = { openTracking(carrier, code) },
+                          onClick = { openTracking(carrier, activeCode.ifBlank { draftCode }) },
                           modifier = Modifier.weight(1f)
                       ) { Text("Zu ${carrier.label}") }
-                      OutlinedButton(onClick = { code = ""; status = "Bereit (v1.5)" }) { Text("Leeren") }
+                      OutlinedButton(
+                          onClick = {
+                              draftCode = ""
+                              activeCode = ""
+                              conflictActive = false
+                              status = "Bereit (v1.7)"
+                          }
+                      ) { Text("Leeren") }
                   }
 
                   OutlinedButton(
