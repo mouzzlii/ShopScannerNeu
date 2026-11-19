@@ -19,6 +19,7 @@ jobs:
 
       - name: Generate fresh project
         run: |
+          rm -rf app
           mkdir -p app/src/main/java/com/shopscanner/neu
 
           cat << 'EOF' > settings.gradle.kts
@@ -57,8 +58,8 @@ jobs:
               applicationId = "com.shopscanner.neu"
               minSdk = 24
               targetSdk = 34
-              versionCode = 1
-              versionName = "1.0"
+              versionCode = 11
+              versionName = "1.1"
             }
             compileOptions {
               sourceCompatibility = JavaVersion.VERSION_17
@@ -151,53 +152,67 @@ jobs:
           @Composable
           fun NeuApp() {
               val ctx = LocalContext.current
-              val prefs = remember { ctx.getSharedPreferences("shopscanner_neu_prefs", Context.MODE_PRIVATE) }
-              val urls = remember {
-                  mutableStateMapOf<Carrier, String>().apply {
-                      Carrier.entries.forEach { put(it, prefs.getString("u_${it.name}", it.url) ?: it.url) }
-                  }
-              }
+              val prefs = remember { ctx.getSharedPreferences("shopscanner_v11", Context.MODE_PRIVATE) }
+
               var autoOpen by remember { mutableStateOf(prefs.getBoolean("auto", false)) }
               var carrier by remember {
-                  val s = prefs.getString("c", Carrier.GLS.name) ?: Carrier.GLS.name
+                  val s = prefs.getString("carrier", Carrier.GLS.name) ?: Carrier.GLS.name
                   mutableStateOf(Carrier.entries.find { it.name == s } ?: Carrier.GLS)
               }
-              var code by remember { mutableStateOf("") }
-              var showUrls by remember { mutableStateOf(false) }
-              var status by remember { mutableStateOf("Bereit") }
 
-              fun savePrefs() {
-                  prefs.edit().apply {
-                      putBoolean("auto", autoOpen)
-                      putString("c", carrier.name)
-                      Carrier.entries.forEach { putString("u_${it.name}", (urls[it] ?: it.url).trim()) }
-                      apply()
-                  }
+              var glsUrl by remember { mutableStateOf(prefs.getString("url_GLS", Carrier.GLS.url) ?: Carrier.GLS.url) }
+              var dpdUrl by remember { mutableStateOf(prefs.getString("url_DPD", Carrier.DPD.url) ?: Carrier.DPD.url) }
+              var hermesUrl by remember { mutableStateOf(prefs.getString("url_HERMES", Carrier.HERMES.url) ?: Carrier.HERMES.url) }
+              var upsUrl by remember { mutableStateOf(prefs.getString("url_UPS", Carrier.UPS.url) ?: Carrier.UPS.url) }
+
+              var code by remember { mutableStateOf("") }
+              var showUrlDialog by remember { mutableStateOf(false) }
+              var status by remember { mutableStateOf("Bereit (v1.1)") }
+
+              fun urlFor(c: Carrier): String = when (c) {
+                  Carrier.GLS -> glsUrl
+                  Carrier.DPD -> dpdUrl
+                  Carrier.HERMES -> hermesUrl
+                  Carrier.UPS -> upsUrl
+              }
+
+              fun saveAll() {
+                  prefs.edit()
+                      .putBoolean("auto", autoOpen)
+                      .putString("carrier", carrier.name)
+                      .putString("url_GLS", glsUrl.trim())
+                      .putString("url_DPD", dpdUrl.trim())
+                      .putString("url_HERMES", hermesUrl.trim())
+                      .putString("url_UPS", upsUrl.trim())
+                      .commit()
               }
 
               fun openTracking(target: Carrier, rawCode: String) {
                   val clean = rawCode.trim().replace(" ", "")
-                  if (clean.isEmpty()) return
+                  if (clean.isEmpty()) {
+                      status = "Bitte Nummer eingeben oder scannen"
+                      return
+                  }
                   val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                   cm.setPrimaryClip(ClipData.newPlainText("Tracking", clean))
-                  val base = (urls[target] ?: target.url).trim().ifBlank { target.url }
+                  val base = urlFor(target).trim().ifBlank { target.url }
                   val full = if (base.endsWith("=") || base.endsWith("/")) base + Uri.encode(clean) else base
                   ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(full)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                   status = "${target.label} geöffnet: $clean"
               }
 
-              fun handleCode(input: String) {
+              fun onCode(input: String) {
                   code = input
                   val found = detectCarrier(input)
                   if (found != null) {
                       carrier = found
+                      saveAll()
                       status = "${found.label} erkannt"
                       if (autoOpen) {
-                          savePrefs()
                           openTracking(found, input)
                       }
                   } else {
-                      status = if (input.isBlank()) "Bereit" else "Anbieter wählen"
+                      status = if (input.isBlank()) "Bereit (v1.1)" else "Anbieter wählen"
                   }
               }
 
@@ -208,6 +223,34 @@ jobs:
                   )
               }
 
+              if (showUrlDialog) {
+                  AlertDialog(
+                      onDismissRequest = { showUrlDialog = false },
+                      title = { Text("Ziel-URLs") },
+                      text = {
+                          Column(
+                              modifier = Modifier.verticalScroll(rememberScrollState()),
+                              verticalArrangement = Arrangement.spacedBy(8.dp)
+                          ) {
+                              OutlinedTextField(value = glsUrl, onValueChange = { glsUrl = it }, label = { Text("GLS") }, singleLine = true)
+                              OutlinedTextField(value = dpdUrl, onValueChange = { dpdUrl = it }, label = { Text("DPD") }, singleLine = true)
+                              OutlinedTextField(value = hermesUrl, onValueChange = { hermesUrl = it }, label = { Text("Hermes") }, singleLine = true)
+                              OutlinedTextField(value = upsUrl, onValueChange = { upsUrl = it }, label = { Text("UPS") }, singleLine = true)
+                          }
+                      },
+                      confirmButton = {
+                          Button(onClick = {
+                              saveAll()
+                              showUrlDialog = false
+                              status = "Einstellungen gespeichert"
+                          }) { Text("Speichern") }
+                      },
+                      dismissButton = {
+                          TextButton(onClick = { showUrlDialog = false }) { Text("Abbrechen") }
+                      }
+                  )
+              }
+
               Column(
                   modifier = Modifier
                       .fillMaxSize()
@@ -215,12 +258,12 @@ jobs:
                       .padding(20.dp),
                   verticalArrangement = Arrangement.spacedBy(12.dp)
               ) {
-                  Text("ShopScannerNeu", style = MaterialTheme.typography.headlineSmall)
+                  Text("ShopScannerNeu v1.1", style = MaterialTheme.typography.headlineSmall)
 
                   Button(
                       onClick = {
                           scanner.startScan()
-                              .addOnSuccessListener { bc -> bc.rawValue?.let { handleCode(it) } }
+                              .addOnSuccessListener { bc -> bc.rawValue?.let { onCode(it) } }
                               .addOnFailureListener { e -> status = "Scan: ${e.localizedMessage ?: "abgebrochen"}" }
                       },
                       modifier = Modifier.fillMaxWidth()
@@ -230,7 +273,7 @@ jobs:
 
                   OutlinedTextField(
                       value = code,
-                      onValueChange = { handleCode(it) },
+                      onValueChange = { onCode(it) },
                       label = { Text("Sendungsnummer") },
                       singleLine = true,
                       modifier = Modifier.fillMaxWidth()
@@ -243,7 +286,11 @@ jobs:
                       Carrier.entries.forEach { item ->
                           FilterChip(
                               selected = carrier == item,
-                              onClick = { carrier = item; savePrefs(); status = "Anbieter: ${item.label}" },
+                              onClick = {
+                                  carrier = item
+                                  saveAll()
+                                  status = "Anbieter: ${item.label} (gespeichert)"
+                              },
                               label = { Text(item.label) }
                           )
                       }
@@ -255,34 +302,29 @@ jobs:
                       horizontalArrangement = Arrangement.spacedBy(12.dp)
                   ) {
                       Text("Automatisch öffnen", modifier = Modifier.weight(1f))
-                      Switch(checked = autoOpen, onCheckedChange = { autoOpen = it; savePrefs() })
+                      Switch(
+                          checked = autoOpen,
+                          onCheckedChange = {
+                              autoOpen = it
+                              saveAll()
+                              status = if (it) "Auto-Öffnen: AN" else "Auto-Öffnen: AUS"
+                          }
+                      )
                   }
 
                   Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                       Button(
-                          onClick = { savePrefs(); openTracking(carrier, code) },
+                          onClick = { saveAll(); openTracking(carrier, code) },
                           modifier = Modifier.weight(1f)
                       ) { Text("Zu ${carrier.label}") }
-                      OutlinedButton(onClick = { code = ""; status = "Bereit" }) { Text("Leeren") }
+                      OutlinedButton(onClick = { code = ""; status = "Bereit (v1.1)" }) { Text("Leeren") }
                   }
 
-                  TextButton(onClick = { showUrls = !showUrls }) {
-                      Text(if (showUrls) "URLs ausblenden" else "Ziel-URLs bearbeiten")
-                  }
-
-                  if (showUrls) {
-                      Carrier.entries.forEach { item ->
-                          OutlinedTextField(
-                              value = urls[item] ?: "",
-                              onValueChange = { urls[item] = it },
-                              label = { Text("${item.label}-URL") },
-                              singleLine = true,
-                              modifier = Modifier.fillMaxWidth()
-                          )
-                      }
-                      Button(onClick = { savePrefs(); status = "URLs gespeichert" }, modifier = Modifier.fillMaxWidth()) {
-                          Text("Speichern")
-                      }
+                  OutlinedButton(
+                      onClick = { showUrlDialog = true },
+                      modifier = Modifier.fillMaxWidth()
+                  ) {
+                      Text("Ziel-URLs bearbeiten")
                   }
 
                   Text(status, style = MaterialTheme.typography.bodyMedium)
